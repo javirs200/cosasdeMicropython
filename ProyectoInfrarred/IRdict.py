@@ -1,0 +1,22 @@
+IRDICT = {
+    "0XFFA25D"  : "power",
+    "0XFFE21D"  : "menu",
+    "0XFF22DD"  : "test",
+    "0XFF02FD"  : "mas",
+    "0XFFC23D"  : "back",
+    "0XFFE01F"  : "rev",
+    "0XFFA857"  : "play",
+    "0XFF906F"  : "fwd",
+    "0XFF6897"  : "0",
+    "0XFF9867"  : "menos",
+    "0XFFB04F"  : "clear",
+    "0XFF30CF"  : "1",
+    "0XFF18E7"  : "2",
+    "0XFF7A85"  : "3",
+    "0XFF10EF"  : "4",
+    "0XFF38C7"  : "5",
+    "0XFF5AA5"  : "6",
+    "0XFF42BD"  : "7",
+    "0XFF4AB5"  : "8",
+    "0XFF52AD"  : "9"
+    }
