@@ -1,8 +1,7 @@
 from MicroWebSrv2  import *
 from time          import sleep
-
+import uasyncio
 import network
-
 from machine import Pin
 import machine
 import os
@@ -18,28 +17,38 @@ global currentTime
 currentTime = rtc.datetime() 
 global started 
 started = False
+global sended 
+sended = False
 
 #hardware pin config
 rederPin=Pin(2,Pin.IN)
+rederPin2=Pin(0,Pin.IN)
 #gloabal variable
-global previousValue
-global value
+global previousValue1
+global previousValue2
+global value1
+global value2
+global timeString
 
-previousValue = 0
-value = 0
+timeString = ""
 
-local_IP       = '192.168.4.1'
-gateway        = '192.168.4.0'
-subnet         = '255.255.255.0'
-dns            = '8.8.8.8'
+previousValue1 = 0
+previousValue2 = 0
+value1 = 0
+value2 = 0
+
+#local_IP       = '192.168.4.1'
+#gateway        = '192.168.4.0'
+#subnet         = '255.255.255.0'
+#dns            = '8.8.8.8'
 
 ssidAP = 'RCWebServer'
 passwordAP = '12345678'
 
 ap = network.WLAN(network.AP_IF)
 
-ap.config(essid=ssidAP,password=passwordAP)
-ap.ifconfig([local_IP,gateway,subnet,dns])
+ap.config(essid=ssidAP,authmode = 3,password=passwordAP) # 3= WPA2-PSK ,0 open
+#ap.ifconfig([local_IP,gateway,subnet,dns])
 ap.active(True)
 
 while ap.active() == False:
@@ -57,31 +66,48 @@ pass
 # ------------------------------------------------------------------------
 
 
-def measureRadioButtonState() -> tuple(bool, int):
-    global previousValue
-    global value
-    changed = True
-    state = 0
+def measureRadioButtonState() -> tuple(bool, int,int):
+    global previousValue1
+    global previousValue2
+    global value1
+    global value2
+    changed = False
+    state1 = 0
+    state2 = 0
     try:
-        value = machine.time_pulse_us(rederPin, 1,1000000)
-        if isclose(value,previousValue,0,50):
+        value1 = machine.time_pulse_us(rederPin, 1,1000000)
+        value2 = machine.time_pulse_us(rederPin2, 1,1000000)
+        cambio1 = isclose(value1,previousValue1,0,50)
+        cambio2 = isclose(value2,previousValue2,0,50)
+        if cambio1 or cambio2:
             pass
             changed = False
         else:
-            previousValue = value
+            if cambio1:
+                previousValue1 = value1
+                pass
+            if cambio2:
+                previousValue2 = value2
+                pass
             changed = True
             pass
-        if value > 1000:
-            state = 0
+        if value1 > 1000:
+            state1 = 0
         else:
-            state = 1
+            state1 = 1
+        pass
+        if value2 > 1000:
+            state2 = 0
+        else:
+            state2 = 1
         pass
     except Exception as e:
         print(e)
         changed = False
-        state = 0
+        state1 = 0
+        state2 = 0
         pass
-    return changed,state
+    return changed,state1,state2
 pass
 
 # ------------------------------------------------------------------------
@@ -99,7 +125,7 @@ def OnWebSocketAccepted(microWebSrv2, webSocket) :
         webSocket.OnClosed        = OnWebSocketClosed
 
     while webSocket is not None:
-        sleep(1)
+        sleep(0.2)
         webSocketSendState(webSocket)
         pass
 
@@ -109,12 +135,12 @@ def webSocketSendState(webSocket):
     global started
     global passtime
     global currentTime
-    timeString = ""
+    global timeString
+    global sended
     state = measureRadioButtonState()
-    #print('State changed: '+ str(state[0]) +' Received State: '+ str(state[1]))
     if state[0] == True :
         if state[1] == 1:
-            print("-----------gris-----------")
+            #print("-----------gris-----------")
             if started:
                 currentTime = rtc.datetime()
                 ms =  round(currentTime[5]*60000000 + currentTime[6]*1000000 + currentTime[7])
@@ -139,26 +165,34 @@ def webSocketSendState(webSocket):
                 timeString += str(seconds)
                 timeString += "."
                 timeString += str(milliseconds)
-                print(str(timeString))
+                print('TIME: "%s"' % str(timeString))
+                if timeString != "":
+                    webSocket.SendTextMessage('TIME: "%s"' % str(timeString))
+                    pass
+                sended = False 
                 started = False
-                print("stopped currentTime" + str(currentTime))
-                print("stopped passtime" + str(passtime))
-                pass
-            else : 
-                print("waiting")
-                print("currentTime" + str(currentTime))
-                print("passtime" + str(passtime))
+            else: 
+                #print("waiting")
                 pass
         elif state[1] == 0:
-            print("---------orange-------------")
+            #print("---------orange-------------")
             if not started:
                 passtime = rtc.datetime()
                 started = True
-                print("started passtime" + str(passtime))
+                timeString = ""
             pass
-        pass
-        if timeString != "":
-            webSocket.SendTextMessage('TIME: "%s"' % str(timeString))
+        if state[2] == 0:
+            if not sended:
+                if timeString != "":
+                    uasyncio.run(append_new_line("data.txt",str(timeString)))
+                    print('triggered chanel 4 Write to file: "%s"' % str(timeString))
+                    webSocket.SendTextMessage('Write to file: "%s"' % str(timeString))
+                    sended = True
+                    pass
+                pass
+            pass
+    pass
+        
 
 # ------------------------------------------------------------------------
 # ------------------------------------------------------------------------
@@ -166,12 +200,12 @@ def webSocketSendState(webSocket):
 
 def OnWebSocketTextMsg(webSocket, msg) :
     print('WebSocket text message: %s' % msg)
-    webSocket.SendTextMessage('Received "%s"' % msg)
+    webSocket.SendTextMessage('msg "%s"' % str(msg))
 
 # ------------------------------------------------------------------------
 
 def OnWebSocketBinaryMsg(webSocket, msg) :
-    print('WebSocket binary message: %s' % msg)
+    print('WebSocket text message: %s' % msg)
 
 # ------------------------------------------------------------------------
 
@@ -182,7 +216,23 @@ def OnWebSocketClosed(webSocket) :
 # ------------------------------------------------------------------------
 # ------------------------------------------------------------------------
 
-print()
+async def append_new_line(file_name, text_to_append):
+    """Append given text as a new line at the end of file"""
+    # Open the file in append & read mode ('a+')
+    with open(file_name, "a+") as file_object:
+        # Move read cursor to the start of file.
+        file_object.seek(0)
+        # If file is not empty then append '\n'
+        data = file_object.read(100)
+        if len(data) > 0:
+            file_object.write("\n")
+        # Append text at the end of file
+        file_object.write(text_to_append)
+
+
+#......................main.................
+
+print("server started")
 
 # Loads the WebSockets module globally and configure it,
 wsMod = MicroWebSrv2.LoadModule('WebSockets')
