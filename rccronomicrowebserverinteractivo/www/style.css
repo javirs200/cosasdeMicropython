@@ -1,0 +1,50 @@
+html, body {
+	margin: 0;
+	padding: 0;
+}
+body {
+	margin: 30px;
+	background-color: rgb(48, 46, 46); 
+	font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+	letter-spacing: 2px;
+	font-size: 150%;
+	text-align: center;
+	align-items: center;
+	align-content: center;
+	color: white;
+}
+
+.mainContent{
+	text-align: center;
+	align-items: center;
+	align-content: center;
+	border: 2px solid #20c92e;
+	border-radius: 8px;
+}
+
+.timetable{
+	margin-left: auto;
+	margin-right: auto;
+	text-align: center;
+	align-content: center;
+	border: 2px solid #20afc9;
+	border-radius: 8px;
+}
+  
+.button1 {
+	background-color: white;
+	color: black;
+	border: 2px solid #20afc9;
+	border-radius: 8px;
+}
+  
+.button1:hover {
+	background-color: #4CAF50;
+	color: white;
+}
+
+
+.button1:active{
+	background-color: #c0a632;
+	color: white;
+}
