@@ -40,8 +40,8 @@ value1 = 0
 #ap.config(essid=ssidAP,authmode = 3,password=passwordAP) # 3= WPA2-PSK ,0 open
 #ap.active(True)
 
-ssidRouter="MIWIFI_ccHC"
-passwordRouter="thEchPhf"
+ssidRouter="POCOX6PRO"
+passwordRouter="xcom1234"
 
 #ssidRouter     = 'HUAWEI P30 lite' #Enter the router name
 #passwordRouter = 'xcom1234' #Enter the router password
