@@ -6,6 +6,8 @@ from machine import Pin
 from machine import RTC
 from machine import time_pulse_us
 from RsmaxUtils  import *
+from RsmaxUtils.mynetwork.networkManager import myNetwork
+
 
 global rtc
 rtc = RTC()
@@ -38,24 +40,6 @@ previousValue2 = 0
 value1 = 0
 value2 = 0
 
-#ssidAP = 'RCWebServer'
-#passwordAP = '12345678'
-
-#ap = network.WLAN(network.AP_IF)
-#ap.config(essid=ssidAP,authmode = 3,password=passwordAP) # 3= WPA2-PSK ,0 open
-#ap.active(True)
-
-ssidRouter     = 'HUAWEI P30 lite' #Enter the router name
-passwordRouter = 'xcom1234' #Enter the router password
-
-
-
-sta_if = network.WLAN(network.STA_IF)
-if not sta_if.isconnected():
-    sta_if.active(True)
-    sta_if.connect(ssidRouter,passwordRouter)
-    while not sta_if.isconnected():
-        pass
 
 # ------------------------------------------------------------------------
 
@@ -210,6 +194,10 @@ def OnWebSocketClosed(webSocket) :
 
 
 #......................main.................
+
+net = myNetwork()
+print('phase 0 , wifi scan')
+net.connectOrReconect()
 
 print("server started")
 
