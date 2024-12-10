@@ -8,7 +8,6 @@ led=Pin(2,Pin.OUT) # onboard led
 led.value(0)
 
 def flash(speed):
-    for i in range(3):
         led.value(1)
         sleep(speed)
         led.value(0)
@@ -24,19 +23,12 @@ e.active(True)
 peer = b'\xbb\xbb\xbb\xbb\xbb\xbb'   # MAC address of multicast 
 e.add_peer(peer)      # Must add_peer() before send()
 
-print("espnow peer conection...")
-
 e.send(peer, "Starting...")
-
-print("starting to send lap ping")
 
 while True:
     try:
         response = e.send(peer,"lap")
-        flash(0.1)
-        sleep(1)
+        flash(0.005) # inerit sleep of 2 x parameter
         pass
     except:
         break
-
-    
