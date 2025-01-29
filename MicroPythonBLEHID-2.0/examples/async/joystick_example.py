@@ -157,4 +157,4 @@ class Device:
 
 if __name__ == "__main__":
     d = Device()
-    d.start_test()
+    d.start()
