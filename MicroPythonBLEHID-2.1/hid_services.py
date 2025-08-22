@@ -18,14 +18,19 @@
 from micropython import const
 import struct
 import bluetooth
-import json
-import binascii
 from bluetooth import UUID
+from hid_keystores import JSONKeyStore
+from hid_keystores import NVSKeyStore
 
 F_READ = bluetooth.FLAG_READ
 F_WRITE = bluetooth.FLAG_WRITE
 F_READ_WRITE = bluetooth.FLAG_READ | bluetooth.FLAG_WRITE
 F_READ_NOTIFY = bluetooth.FLAG_READ | bluetooth.FLAG_NOTIFY
+F_READ_WRITE_NORESPONSE = bluetooth.FLAG_READ | bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE
+F_READ_WRITE_NOTIFY_NORESPONSE = bluetooth.FLAG_READ | bluetooth.FLAG_WRITE | bluetooth.FLAG_NOTIFY | bluetooth.FLAG_WRITE_NO_RESPONSE
+
+DSC_F_READ = 0x02
+DSC_F_WRITE = 0x03
 
 # Advertising payloads are repeated packets of the following form:
 #   1 byte data length (N + 1)
@@ -85,11 +90,15 @@ _PASSKEY_ACTION_DISP = const(3)
 _PASSKEY_ACTION_NUMCMP = const(4)
 
 _GATTS_NO_ERROR = const(0x00)
+_GATTS_ERROR_INVALID_HANDLE = const(0x01)
 _GATTS_ERROR_READ_NOT_PERMITTED = const(0x02)
 _GATTS_ERROR_WRITE_NOT_PERMITTED = const(0x03)
 _GATTS_ERROR_INSUFFICIENT_AUTHENTICATION = const(0x05)
+_GATTS_ERROR_REQ_NOT_SUPPORTED = const(0x06)
 _GATTS_ERROR_INSUFFICIENT_AUTHORIZATION = const(0x08)
+_GATTS_ERROR_ATTR_NOT_FOUND = const(0x0a)
 _GATTS_ERROR_INSUFFICIENT_ENCRYPTION = const(0x0f)
+_GATTS_ERROR_WRITE_REQ_REJECTED = const(0xFC)
 
 class Advertiser:
 
@@ -171,7 +180,6 @@ class Advertiser:
             self._ble.gap_advertise(0, adv_data=self._payload)
             print("Stopped advertising")
 
-
 # Class that represents a general HID device services.
 class HumanInterfaceDevice(object):
     # Define device states
@@ -196,13 +204,11 @@ class HumanInterfaceDevice(object):
         self.key_size = 0                                                                                               # The encryption key size.
 
         self.passkey = 1234                                                                                             # The standard passkey for pairing. Only used when io capability allows so. Use the set_passkey(passkey) function to overwrite.
-        self.keys = {}                                                                                                  # The key store for bonding
-
-        self.load_secrets()                                                                                             # Call the function to load the known keys for bonding into the key store.
+        self.secrets = NVSKeyStore()                                                                                   # The key store for bonding
 
         # General characteristics.
         self.device_name = device_name                                                                                  # The device name.
-        self.service_uuids = [UUID(0x180A), UUID(0x180F), UUID(0x1812)]                                                 # Service UUIDs: DIS, BAS, HIDS (Device Information Service, BAttery Service, Human Interface Device Service). These are required for a HID.
+        self.service_uuids = [UUID(0x180A), UUID(0x180F), UUID(0x1200), UUID(0x1812)]                                   # Service UUIDs: DIS, BAS, DID, HIDS (Device Information Service, BAttery Service, Device Identification service, Human Interface Device Service). These are required for a HID.
         self.device_appearance = 960                                                                                    # The device appearance: 960 = Generic HID.
 
         # Device Information Service (DIS) characteristics.
@@ -215,15 +221,15 @@ class HumanInterfaceDevice(object):
 
         # DIS plug and play (PnP) characteristics.
         self.pnp_manufacturer_source = 0x01                                                                             # The manufacturer source. 0x01 = Bluetooth uuid list.
-        self.pnp_manufacturer_uuid = 0xFE61                                                                             # The manufacturer id, e.g., 0xFEB2 for Microsoft, 0xFE61 for Logitech, 0xFD65 for Razer.
+        self.pnp_manufacturer_uuid = 0xFFFF                                                                             # The manufacturer id, e.g., 0xFEB2 for Microsoft, 0xFE61 for Logitech, 0xFD65 for Razer, 0xFFFF = default.
         self.pnp_product_id = 0x01                                                                                      # The product id. 0x01 = 1.
-        self.pnp_product_version = 0x0123                                                                               # The product version. 0x0123 = 1.2.3.
+        self.pnp_product_version = 0x0123                                                                               # The product version. 0x0123 = 1.23.
 
         # BAttery Service (BAS) characteristics.
         self.battery_level = 100                                                                                        # The battery level characteristic (percentages).
 
-        # Device Information Service (DIS) description.
-        self.DIS = (
+
+        self.DIS = (                                                                                                    # Device Information Service (DIS) description.
             UUID(0x180A),                                                                                               # 0x180A = Device Information.
             (
                 (UUID(0x2A24), F_READ),                                                                                 # 0x2A24 = Model number string, to be read by client.
@@ -236,17 +242,32 @@ class HumanInterfaceDevice(object):
             ),
         )
 
-        # Battery Service (BAS) description.
-        self.BAS = (
+        self.BAS = (                                                                                                    # Battery Service (BAS) description.
             UUID(0x180F),                                                                                               # 0x180F = Battery Information.
             (
-                (UUID(0x2A19), F_READ_NOTIFY),                                                                          # 0x2A19 = Battery level, to be read by client after being notified of change.
+                (UUID(0x2A19), F_READ_NOTIFY, (                                                                         # 0x2A19 = Battery level, to be read by client after being notified of change.
+                    (UUID(0x2904), DSC_F_READ),                                                                         # 0x2904 = Characteristic Presentation Format.
+                )),
             ),
         )
 
-        self.services = [self.DIS, self.BAS]                                                                            # List of service descriptions. We will append HIDS in their respective subclasses.
+        self.DID = (                                                                                                    # Device Identification Profile (DID) description.
+            UUID(0x1200),                                                                                               # 0x1200 = PnPInformation.
+            (
+                (UUID(0x0200), F_READ),                                                                                 # 0x0200 = SpecificationID.
+                (UUID(0x0201), F_READ),                                                                                 # 0x0201 = VendorID.
+                (UUID(0x0202), F_READ),                                                                                 # 0x0202 = ProductID.
+                (UUID(0x0203), F_READ),                                                                                 # 0x0203 = Version.
+                (UUID(0x0204), F_READ),                                                                                 # 0x0204 = PrimaryRecord.
+                (UUID(0x0205), F_READ),                                                                                 # 0x0205 = VendorIDSource.
+            ),
+        )
 
-        self.HID_INPUT_REPORT = None                                                                                    # The HID USB input report. We will specify thesein their respective subclasses.
+        self.services = [self.DIS, self.BAS, self.DID]                                                                  # List of service descriptions. We will append HIDS in their respective subclasses.
+
+        self.HID_INPUT_REPORT = None                                                                                    # The HID USB input report. We will specify these in their respective subclasses.
+
+        self.characteristics = {}                                                                                       # List which maps handles to (description, value) tuple.
 
         print("Server created")
 
@@ -255,7 +276,7 @@ class HumanInterfaceDevice(object):
         if event == _IRQ_CENTRAL_CONNECT:                                                                               # Central connected.
             self.conn_handle, _, _ = data                                                                               # Save the handle. HIDS specification only allow one central to be connected.
             self.set_state(HumanInterfaceDevice.DEVICE_CONNECTED)                                                       # Set the device state to connected.
-            print("Central connected: ", self.conn_handle)
+            print("Central connected:", self.conn_handle)
         elif event == _IRQ_CENTRAL_DISCONNECT:                                                                          # Central disconnected.
             conn_handle, addr_type, addr = data
             self.conn_handle = None                                                                                     # Discard old handle.
@@ -263,12 +284,26 @@ class HumanInterfaceDevice(object):
             self.encrypted = False
             self.authenticated = False
             self.bonded = False
-            print("Central disconnected: ", conn_handle)
+            print("Central disconnected:", conn_handle)
+        elif event == _IRQ_GATTS_WRITE:                                                                                 # Write operation from client.
+            conn_handle, attr_handle = data
+            value = self._ble.gatts_read(attr_handle)
+            description, _val = self.characteristics.get(attr_handle, (None, None))
+            if description is None:
+                print("Client initiated write on unknown handle:", attr_handle, "with value", value)
+                return _GATTS_ERROR_ATTR_NOT_FOUND
+            else:
+                self.characteristics[attr_handle] = (description, value)
+                print("Client initiated write on", description, "with value", value)
+                return _GATTS_NO_ERROR
         elif event == _IRQ_GATTS_READ_REQUEST:                                                                          # Read request from client.
             conn_handle, attr_handle = data
-            print("Read request: ", attr_handle)
+            description, val = self.characteristics.get(attr_handle, (None, None))
+            print("Read request:", description if description else attr_handle, "with value" if val else "", val if val else "")
             if conn_handle != self.conn_handle:                                                                         # If different connection, return no permission.
                 return _GATTS_ERROR_READ_NOT_PERMITTED
+            elif description == None:                                                                                   # If the handle is unknown, return invalid handle.
+                return _GATTS_ERROR_INVALID_HANDLE
             elif self.bond and not self.bonded:                                                                         # If we wish to bond but are not bonded, return insufficient authorization.
                 return _GATTS_ERROR_INSUFFICIENT_AUTHORIZATION
             elif self.io_capability > _IO_CAPABILITY_NO_INPUT_OUTPUT and not self.authenticated:                        # If we can authenticate but the client hasn't authenticated, return insufficient authentication.
@@ -279,31 +314,31 @@ class HumanInterfaceDevice(object):
                 return _GATTS_NO_ERROR
         elif event == _IRQ_GATTS_INDICATE_DONE:                                                                         # A sent indication was done. (We don't use indications currently. If needed, define a callback function and override this function.)
             conn_handle, value_handle, status = data
-            print("Indicate done: ", data)
+            print("Indicate done:", data)
         elif event == _IRQ_MTU_EXCHANGED:                                                                               # MTU was exchanged, set it.
             conn_handle, mtu = data
             self._ble.config(mtu=mtu)
-            print("MTU exchanged: ", mtu)
+            print("MTU exchanged:", mtu)
         elif event == _IRQ_CONNECTION_UPDATE:                                                                           # Connection parameters were updated.
             self.conn_handle, conn_interval, conn_latency, supervision_timeout, status = data                           # The new parameters.
-            print("Connection update. Interval=", conn_interval, " latency=", conn_latency, " timeout=", supervision_timeout, " status=", status)
+            print("Connection update. Interval=", conn_interval, "latency=", conn_latency, "timeout=", supervision_timeout, "status=", status)
             return None                                                                                                 # Return an empty packet.
         elif event == _IRQ_ENCRYPTION_UPDATE:                                                                           # Encryption was updated.
             conn_handle, self.encrypted, self.authenticated, self.bonded, self.key_size = data                          # Update the values.
-            print("encryption update", conn_handle, self.encrypted, self.authenticated, self.bonded, self.key_size)
+            print("Encryption update:", conn_handle, self.encrypted, self.authenticated, self.bonded, self.key_size)
         elif event == _IRQ_PASSKEY_ACTION:                                                                              # Passkey actions: accept connection or show/enter passkey.
             conn_handle, action, passkey = data
-            print("passkey action", conn_handle, action, passkey)
+            print("Passkey action:", conn_handle, action, passkey)
             if action == _PASSKEY_ACTION_NUMCMP:                                                                        # Do we accept this connection?
                 accept = False
                 if self.passkey_callback is not None:                                                                   # Is callback function set?
                     accept = self.passkey_callback()                                                                    # Call callback for input.
                 self._ble.gap_passkey(conn_handle, action, accept)
             elif action == _PASSKEY_ACTION_DISP:                                                                        # Show our passkey.
-                print("displaying passkey")
+                print("Displaying passkey")
                 self._ble.gap_passkey(conn_handle, action, self.passkey)
             elif action == _PASSKEY_ACTION_INPUT:                                                                       # Enter passkey.
-                print("prompting for passkey")
+                print("Prompting for passkey")
                 pk = None
                 if self.passkey_callback is not None:                                                                   # Is callback function set?
                     pk = self.passkey_callback()                                                                        # Call callback for input.
@@ -312,42 +347,35 @@ class HumanInterfaceDevice(object):
                 print("Unknown passkey action")
         elif event == _IRQ_SET_SECRET:                                                                                  # Set secret for bonding.
             sec_type, key, value = data
-            key = sec_type, bytes(key)
-            value = bytes(value) if value else None
-            print("set secret: ", key, value)
             if value is None:                                                                                           # If value is empty, and
-                if key in self.keys:                                                                                    # If key is known then
-                    del self.keys[key]                                                                                  # Forget key
-                    self.save_secrets()                                                                                 # Save bonding information
+                if self.secrets.has_secret(sec_type, key):                                                              # If key is known then
+                    self.secrets.remove_secret(sec_type, key)                                                           # Forget key
+                    self.secrets.save_secrets()
+                    print("Removing secret:", bytes(key))
                     return True
                 else:
+                    print("Secret not found:", bytes(key))
                     return False
             else:
-                self.keys[key] = value                                                                                  # Remember key/value
-                self.save_secrets()                                                                                     # Save bonding information
+                self.secrets.add_secret(sec_type, key, value)                                                           # Remember key/value
+                self.secrets.save_secrets()
+                print("Saving secret:", bytes(key), bytes(value))
             return True
         elif event == _IRQ_GET_SECRET:                                                                                  # Get secret for bonding
             sec_type, index, key = data
-            print("get secret: ", sec_type, index, bytes(key) if key else None)
-            if key is None:
-                i = 0
-                for (t, _key), value in self.keys.items():
-                    if t == sec_type:
-                        if i == index:
-                            return value
-                        i += 1
-                return None
-            else:
-                key = sec_type, bytes(key)
-                return self.keys.get(key, None)
+            value = self.secrets.get_secret(sec_type, index, key)
+            print("Returning secret:", bytes(value) if value else None, "for", "key" if key else "index", bytes(key) if key else index, "with type", sec_type)
+            return value
         else:
-            print("Unhandled IRQ event: ", event)
+            print("Unhandled IRQ event:", event)
 
     # Start the service.
     # Must be overwritten by subclass, and called in
     # the overwritten function by using super(Subclass, self).start().
     def start(self):
         if self.device_state is HumanInterfaceDevice.DEVICE_STOPPED:
+            self.secrets.load_secrets()                                                                                 # Call the function to load the known keys for bonding into the key store.
+
             self._ble.irq(self.ble_irq)                                                                                 # Set interrupt request callback function.
             self._ble.active(1)                                                                                         # Turn on BLE radio.
 
@@ -360,38 +388,46 @@ class HumanInterfaceDevice(object):
             self._ble.config(io=self.io_capability)                                                                     # Set our input/output capabilities. Determines whether and how passkeys are used.
 
             self.set_state(HumanInterfaceDevice.DEVICE_IDLE)                                                            # Update the device state.
-            print("BLE on")
+
+            (addr_type, addr) = self._ble.config('mac')                                                                 # Get our address type and mac address.
+
+            print("BLE on with", "random" if addr_type else "public", "mac address", addr)
 
     # After registering the DIS and BAS services, write their characteristic values.
     # Must be overwritten by subclass, and called in
     # the overwritten function by using
-    # super(Subclass, self).write_service_characteristics(handles).
-    def write_service_characteristics(self, handles):
+    # super(Subclass, self).save_service_characteristics(handles).
+    def save_service_characteristics(self, handles):
         print("Writing service characteristics")
 
         (h_mod, h_ser, h_fwr, h_hwr, h_swr, h_man, h_pnp) = handles[0]                                                  # Get handles to DIS service characteristics. These correspond directly to its definition in self.DIS. Position 0 because of the order of self.services.
-        (self.h_bat,) = handles[1]                                                                                      # Get handles to BAS service characteristics. These correspond directly to its definition in self.BAS. Position 1 because of the order of self.services.
-
-        print("h_mod =", h_mod, "h_ser =", h_ser, "h_fwr =", h_fwr, "h_hwr =", h_hwr, "h_swr =", h_swr, "h_man =", h_man, "h_pnp =", h_pnp)
-        print("h_bat =", self.h_bat)
+        (self.h_bat, h_bfmt,) = handles[1]                                                                              # Get handles to BAS service characteristics. These correspond directly to its definition in self.BAS. Position 1 because of the order of self.services.
+        (h_sid, h_vid, h_pid, h_ver, h_rec, h_vs) = handles[2]                                                          # Get handles to DID service characteristics. These correspond directly to its definition in self.DID. Position 2 because of the order of self.services.
 
         # Simplify packing strings into byte arrays.
         def string_pack(in_str, nr_bytes):
             return struct.pack(str(nr_bytes)+"s", in_str.encode('UTF-8'))
 
-        print("Writing device information service characteristics")
-        # Write DIS characteristics.
-        self._ble.gatts_write(h_mod, string_pack(self.model_number, 24))
-        self._ble.gatts_write(h_ser, string_pack(self.serial_number, 16))
-        self._ble.gatts_write(h_fwr, string_pack(self.firmware_revision, 8))
-        self._ble.gatts_write(h_hwr, string_pack(self.hardware_revision, 16))
-        self._ble.gatts_write(h_swr, string_pack(self.software_revision, 8))
-        self._ble.gatts_write(h_man, string_pack(self.manufacture_name, 36))
-        self._ble.gatts_write(h_pnp, struct.pack("<BHHH", self.pnp_manufacturer_source, self.pnp_manufacturer_uuid, self.pnp_product_id, self.pnp_product_version))
+        print("Saving device information service characteristics")
+        self.characteristics[h_mod] = ("Model number", string_pack(self.model_number, 24))
+        self.characteristics[h_ser] = ("Serial number", string_pack(self.serial_number, 16))
+        self.characteristics[h_fwr] = ("Firmware revision", string_pack(self.firmware_revision, 8))
+        self.characteristics[h_hwr] = ("Hardware revision", string_pack(self.hardware_revision, 16))
+        self.characteristics[h_swr] = ("Software revision", string_pack(self.software_revision, 8))
+        self.characteristics[h_man] = ("Manufacturer name", string_pack(self.manufacture_name, 36))
+        self.characteristics[h_pnp] = ("PnP information", struct.pack(">BHHH", self.pnp_manufacturer_source, self.pnp_manufacturer_uuid, self.pnp_product_id, self.pnp_product_version))
 
-        print("Writing battery service characteristics")
-        # Write BAS characteristics.
-        self._ble.gatts_write(self.h_bat, struct.pack("<B", self.battery_level))
+        print("Saving battery service characteristics")
+        self.characteristics[self.h_bat] = ("Battery level", struct.pack("<B", self.battery_level))
+        self.characteristics[h_bfmt] = ("Battery format", b'\x04\x00\xad\x27\x01\x00\x00')
+
+        print("Saving device identification service characteristics")
+        self.characteristics[h_sid] = ("Specification ID", b'0x0103')
+        self.characteristics[h_vid] = ("Vendor ID", struct.pack(">H", self.pnp_manufacturer_uuid))
+        self.characteristics[h_pid] = ("Product ID", struct.pack(">H", self.pnp_product_id))
+        self.characteristics[h_ver] = ("Version", struct.pack(">H", self.pnp_product_version))
+        self.characteristics[h_rec] = ("Primary record", b'0x01')
+        self.characteristics[h_vs] = ("Vendor source", struct.pack(">H", self.pnp_manufacturer_source))
 
     # Stop the service.
     def stop(self):
@@ -408,27 +444,12 @@ class HumanInterfaceDevice(object):
             self.set_state(HumanInterfaceDevice.DEVICE_STOPPED)
             print("Server stopped")
 
-    # Load bonding keys from json file.
-    def load_secrets(self):
-        try:
-            with open("keys.json", "r") as file:
-                entries = json.load(file)
-                for sec_type, key, value in entries:
-                    self.keys[sec_type, binascii.a2b_base64(key)] = binascii.a2b_base64(value)
-        except:
-            print("no secrets available")
+    # Write service characteristics
+    def write_service_characteristics(self):
+        print("Writing service characteristics")
 
-    # Save bonding keys to json file.
-    def save_secrets(self):
-        try:
-            with open("keys.json", "w") as file:
-                json_secrets = [
-                    (sec_type, binascii.b2a_base64(key), binascii.b2a_base64(value))
-                    for (sec_type, key), value in self.keys.items()
-                ]
-                json.dump(json_secrets, file)
-        except:
-            print("failed to save secrets")
+        for handle, (name, value) in self.characteristics.items():
+            self._ble.gatts_write(handle, value)
 
     # Returns whether the device is not stopped.
     def is_running(self):
@@ -551,6 +572,11 @@ class HumanInterfaceDevice(object):
     def set_io_capability(self, io_capability):
         self.io_capability = io_capability
 
+    # Set the keystore class to use.
+    # Must be called before calling Start().
+    def set_keystore(self, keystore):
+        self.secrets = keystore
+
     # Set callback function for pairing events.
     # Depending on the I/O capability used, the callback function should return either a
     # - boolean to accept or deny a connection, or a
@@ -566,7 +592,9 @@ class HumanInterfaceDevice(object):
     def notify_battery_level(self):
         if self.is_connected():
             print("Notify battery level: ", self.battery_level)
-            self._ble.gatts_notify(self.conn_handle, self.h_bat, struct.pack("<B", self.battery_level))
+            value = struct.pack("<B", self.battery_level)
+            self.characteristics[self.h_bat] = ("Battery level", value)
+            self._ble.gatts_notify(self.conn_handle, self.h_bat, value)
 
     # Notifies the client of the HID state.
     # Must be overwritten by subclass.
@@ -579,19 +607,21 @@ class Joystick(HumanInterfaceDevice):
         super(Joystick, self).__init__(name)                                                                            # Set up the general HID services in super.
         self.device_appearance = 963                                                                                    # Overwrite the device appearance ID, 963 = joystick.
 
-        self.HIDS = (                                                                                                   # HID service description: describes the service and how we communicate
-            UUID(0x1812),                                                                                               # 0x1812 = Human Interface Device
+        self.HIDS = (                                                                                                   # HID service description: describes the service and how we communicate.
+            UUID(0x1812),                                                                                               # 0x1812 = Human Interface Device.
             (
                 (UUID(0x2A4A), F_READ),                                                                                 # 0x2A4A = HID information characteristic, to be read by client.
                 (UUID(0x2A4B), F_READ),                                                                                 # 0x2A4B = HID USB report map, to be read by client.
-                (UUID(0x2A4C), F_WRITE),                                                                                # 0x2A4C = HID control point, to be written by client.
-                (UUID(0x2A4D), F_READ_NOTIFY, ((UUID(0x2908), F_READ),)),                                               # 0x2A4D = HID report / 0X2908 = reference, to be read by client after notification / to be read by client.
-                (UUID(0x2A4E), F_READ_WRITE),                                                                           # 0x2A4E = HID protocol mode, to be written & read by client.
+                (UUID(0x2A4C), F_READ_WRITE_NORESPONSE),                                                                # 0x2A4C = HID control point, to be written by client.
+                (UUID(0x2A4D), F_READ_NOTIFY, (                                                                         # 0x2A4D = HID report, to be read by client after notification.
+                    (UUID(0x2908), DSC_F_READ),                                                                         # 0x2908 = HID reference, to be read by client.
+                )),
+                (UUID(0x2A4E), F_READ_WRITE_NORESPONSE),                                                                # 0x2A4E = HID protocol mode, to be written & read by client.
             ),
         )
 
         # fmt: off
-        self.HID_INPUT_REPORT = bytes([                                                                                 # USB Report Description: describes what we communicate.
+        self.HID_INPUT_REPORT = [                                                                                       # USB Report Description: describes what we communicate.
             0x05, 0x01,                                                                                                 # USAGE_PAGE (Generic Desktop)
             0x09, 0x04,                                                                                                 # USAGE (Joystick)
             0xa1, 0x01,                                                                                                 # COLLECTION (Application)
@@ -614,7 +644,7 @@ class Joystick(HumanInterfaceDevice):
             0x81, 0x02,                                                                                                 #     Input (Data, Variable, Absolute)
             0xc0,                                                                                                       #   END_COLLECTION
             0xc0                                                                                                        # END_COLLECTION
-        ])
+        ]
         # fmt: on
 
         # Define the initial joystick state.
@@ -630,7 +660,7 @@ class Joystick(HumanInterfaceDevice):
         self.button7 = 0
         self.button8 = 0
 
-        self.services = [self.DIS, self.BAS, self.HIDS]                                                                 # Overwrite list of service descriptions.
+        self.services.append(self.HIDS)                                                                                 # Append to list of service descriptions.
 
     # Overwrite super to register HID specific service.
     def start(self):
@@ -638,32 +668,35 @@ class Joystick(HumanInterfaceDevice):
 
         print("Registering services")
         handles = self._ble.gatts_register_services(self.services)                                                      # Register services and get read/write handles for all services.
-        self.write_service_characteristics(handles)                                                                     # Write the values for the characteristics.
+        self.save_service_characteristics(handles)                                                                      # Save the values for the characteristics.
+        self.write_service_characteristics()                                                                            # Write the values for the characteristics.
         self.adv = Advertiser(self._ble, [UUID(0x1812)], self.device_appearance, self.device_name)                      # Create an Advertiser. Only advertise the top level service, i.e., the HIDS.
         print("Server started")
 
-    # Overwrite super to write HID specific characteristics.
-    def write_service_characteristics(self, handles):
-        super(Joystick, self).write_service_characteristics(handles)                                                    # Call super to write DIS and BAS characteristics.
+    # Overwrite super to save HID specific characteristics.
+    def save_service_characteristics(self, handles):
+        super(Joystick, self).save_service_characteristics(handles)                                                     # Call super to save DIS and BAS characteristics.
 
-        (h_info, h_hid, _, self.h_rep, h_d1, h_proto) = handles[2]                                                      # Get the handles for the HIDS characteristics. These correspond directly to self.HIDS. Position 2 because of the order of self.services.
+        (h_info, h_hid, h_ctrl, self.h_rep, h_d1, h_proto) = handles[3]                                                 # Get the handles for the HIDS characteristics. These correspond directly to self.HIDS. Position 3 because of the order of self.services.
 
         b = self.button1 + self.button2 * 2 + self.button3 * 4 + self.button4 * 8 + self.button5 * 16 + self.button6 * 32 + self.button7 * 64 + self.button8 * 128
         state = struct.pack("bbB", self.x, self.y, b)                                                                   # Pack the initial joystick state as described by the input report.
 
-        print("Writing hid service characteristics")
-        # Write service characteristics
-        self._ble.gatts_write(h_info, b"\x01\x01\x00\x02")                                                              # HID info: ver=1.1, country=0, flags=normal.
-        self._ble.gatts_write(h_hid, self.HID_INPUT_REPORT)                                                             # HID input report map.
-        self._ble.gatts_write(self.h_rep, state)                                                                        # HID report.
-        self._ble.gatts_write(h_d1, struct.pack("<BB", 1, 1))                                                           # HID reference: id=1, type=input.
-        self._ble.gatts_write(h_proto, b"\x01")                                                                         # HID protocol mode: report.
+        print("Saving HID service characteristics")
+        # Save service characteristics
+        self.characteristics[h_info] = ("HID information", b"\x01\x01\x00\x00")                                         # HID info: ver=1.1, country=0, flags=000000cw with c=normally connectable w=wake up signal
+        self.characteristics[h_hid] = ("HID input report map", bytes(self.HID_INPUT_REPORT))                            # HID input report map.
+        self.characteristics[h_ctrl] = ("HID control point", b"\x00")                                                   # HID control point.
+        self.characteristics[self.h_rep] = ("HID report", state)                                                        # HID report.
+        self.characteristics[h_d1] = ("HID reference", struct.pack("<BB", 1, 1))                                        # HID reference: id=1, type=input.
+        self.characteristics[h_proto] = ("HID protocol mode", b"\x01")                                                  # HID protocol mode: report.
 
     # Overwrite super to notify central of a hid report.
     def notify_hid_report(self):
         if self.is_connected():
             b = self.button1 + self.button2 * 2 + self.button3 * 4 + self.button4 * 8 + self.button5 * 16 + self.button6 * 32 + self.button7 * 64 + self.button8 * 128
             state = struct.pack("bbB", self.x, self.y, b)                                                               # Pack the joystick state as described by the input report.
+            self.characteristics[self.h_rep] = ("HID report", state)
             self._ble.gatts_notify(self.conn_handle, self.h_rep, state)                                                 # Notify client by writing to the report handle.
             print("Notify with report: ", struct.unpack("bbB", state))
 
@@ -704,14 +737,16 @@ class Mouse(HumanInterfaceDevice):
             (
                 (UUID(0x2A4A), F_READ),                                                                                 # 0x2A4A = HID information, to be read by client.
                 (UUID(0x2A4B), F_READ),                                                                                 # 0x2A4B = HID report map, to be read by client.
-                (UUID(0x2A4C), F_WRITE),                                                                                # 0x2A4C = HID control point, to be written by client.
-                (UUID(0x2A4D), F_READ_NOTIFY, ((UUID(0x2908), F_READ),)),                                               # 0x2A4D = HID report / 0x2908 = reference, to be read by client after notification / to be read by client.
-                (UUID(0x2A4E), F_READ_WRITE),                                                                           # 0x2A4E = HID protocol mode, to be written & read by client.
+                (UUID(0x2A4C), F_READ_WRITE_NORESPONSE),                                                                # 0x2A4C = HID control point, to be written by client.
+                (UUID(0x2A4D), F_READ_NOTIFY, (                                                                         # 0x2A4D = HID report, to be read by client after notification.
+                    (UUID(0x2908), DSC_F_READ),                                                                         # 0x2908 = HID reference, to be read by client.
+                )),
+                (UUID(0x2A4E), F_READ_WRITE_NORESPONSE),                                                                # 0x2A4E = HID protocol mode, to be written & read by client.
             ),
         )
 
         # fmt: off
-        self.HID_INPUT_REPORT = bytes([                                                                                 # Report Description: describes what we communicate.
+        self.HID_INPUT_REPORT = [                                                                                       # Report Description: describes what we communicate.
             0x05, 0x01,                                                                                                 # USAGE_PAGE (Generic Desktop)
             0x09, 0x02,                                                                                                 # USAGE (Mouse)
             0xa1, 0x01,                                                                                                 # COLLECTION (Application)
@@ -740,7 +775,7 @@ class Mouse(HumanInterfaceDevice):
             0x81, 0x06,                                                                                                 #         Input(Data, Variable, Relative); 3 position bytes (X,Y,Wheel)
             0xc0,                                                                                                       #   END_COLLECTION
             0xc0                                                                                                        # END_COLLECTION
-        ])
+        ]
         # fmt: on
 
         # Define the initial mouse state.
@@ -752,7 +787,7 @@ class Mouse(HumanInterfaceDevice):
         self.button2 = 0
         self.button3 = 0
 
-        self.services = [self.DIS, self.BAS, self.HIDS]                                                                 # Override list of service descriptions.
+        self.services.append(self.HIDS)                                                                                 # Append to list of service descriptions.
 
     # Overwrite super to register HID specific service.
     def start(self):
@@ -760,34 +795,35 @@ class Mouse(HumanInterfaceDevice):
 
         print("Registering services")
         handles = self._ble.gatts_register_services(self.services)                                                      # Register services and get read/write handles for all services.
-        self.write_service_characteristics(handles)                                                                     # Write the values for the characteristics.
+        self.save_service_characteristics(handles)                                                                      # Save the values for the characteristics.
+        self.write_service_characteristics()                                                                            # Write the values for the characteristics.
         self.adv = Advertiser(self._ble, [UUID(0x1812)], self.device_appearance, self.device_name)                      # Create an Advertiser. Only advertise the top level service, i.e., the HIDS.
 
         print("Server started")
 
-    # Overwrite super to write HID specific characteristics.
-    def write_service_characteristics(self, handles):
-        super(Mouse, self).write_service_characteristics(handles)                                                       # Call super to write DIS and BAS characteristics.
+    # Overwrite super to save HID specific characteristics.
+    def save_service_characteristics(self, handles):
+        super(Mouse, self).save_service_characteristics(handles)                                                        # Call super to write DIS and BAS characteristics.
 
-        (h_info, h_hid, h_ctrl, self.h_rep, h_d1, h_proto) = handles[2]                                                 # Get the handles for the HIDS characteristics. These correspond directly to self.HIDS. Position 2 because of the order of self.services.
-        print("h_info =", h_info, "h_hid =", h_hid, "h_ctrl =", h_ctrl, "h_rep =", self.h_rep, "h_d1ref =", h_d1, "h_proto =", h_proto)
+        (h_info, h_hid, h_ctrl, self.h_rep, h_d1, h_proto) = handles[3]                                                 # Get the handles for the HIDS characteristics. These correspond directly to self.HIDS. Position 3 because of the order of self.services.
 
         b = self.button1 + self.button2 * 2 + self.button3 * 4
         state = struct.pack("Bbbb", b, self.x, self.y, self.w)                                                          # Pack the initial mouse state as described by the input report.
 
-        print("Writing hid service characteristics")
-        # Write service characteristics.
-        self._ble.gatts_write(h_info, b"\x01\x01\x00\x02")                                                              # HID info: ver=1.1, country=0, flags=normal.
-        self._ble.gatts_write(h_hid, self.HID_INPUT_REPORT)                                                             # HID input report map.
-        self._ble.gatts_write(self.h_rep, state)                                                                        # HID report.
-        self._ble.gatts_write(h_d1, struct.pack("<BB", 1, 1))                                                           # HID reference: id=1, type=input.
-        self._ble.gatts_write(h_proto, b"\x01")                                                                         # HID protocol mode: report.
+        print("Saving HID service characteristics")
+        self.characteristics[h_info] = ("HID information", b"\x01\x01\x00\x00")                                         # HID info: ver=1.1, country=0, flags=000000cw with c=normally connectable w=wake up signal
+        self.characteristics[h_hid] = ("HID input report map", bytes(self.HID_INPUT_REPORT))                            # HID input report map.
+        self.characteristics[h_ctrl] = ("HID control point", b"\x00")                                                   # HID control point.
+        self.characteristics[self.h_rep] = ("HID report", state)                                                        # HID report.
+        self.characteristics[h_d1] = ("HID reference", struct.pack("<BB", 1, 1))                                        # HID reference: id=1, type=input.
+        self.characteristics[h_proto] = ("HID protocol mode", b"\x01")                                                  # HID protocol mode: report.
 
     # Overwrite super to notify central of a hid report
     def notify_hid_report(self):
         if self.is_connected():
             b = self.button1 + self.button2 * 2 + self.button3
             state = struct.pack("Bbbb", b, self.x, self.y, self.w)                                                      # Pack the mouse state as described by the input report.
+            self.characteristics[self.h_rep] = ("HID report", state)
             self._ble.gatts_notify(self.conn_handle, self.h_rep, state)                                                 # Notify central by writing to the report handle.
             print("Notify with report: ", struct.unpack("Bbbb", state))
 
@@ -832,15 +868,19 @@ class Keyboard(HumanInterfaceDevice):
             (
                 (UUID(0x2A4A), F_READ),                                                                                 # 0x2A4A = HID information, to be read by client.
                 (UUID(0x2A4B), F_READ),                                                                                 # 0x2A4B = HID report map, to be read by client.
-                (UUID(0x2A4C), F_WRITE),                                                                                # 0x2A4C = HID control point, to be written by client.
-                (UUID(0x2A4D), F_READ_NOTIFY, ((UUID(0x2908), F_READ),)),                                               # 0x2A4D = HID report / 0x2908 = reference, to be read by client after notification / to be read by client.
-                (UUID(0x2A4D), F_READ_WRITE, ((UUID(0x2908), F_READ),)),                                                # 0x2A4D = HID report / 0x2908 = reference, to be read & written by client / to be read by client.
-                (UUID(0x2A4E), F_READ_WRITE),                                                                           # 0x2A4E = HID protocol mode, to be written & read by client.
+                (UUID(0x2A4C), F_READ_WRITE_NORESPONSE),                                                                # 0x2A4C = HID control point, to be written by client.
+                (UUID(0x2A4D), F_READ_NOTIFY, (                                                                         # 0x2A4D = HID report, to be read by client after notification.
+                    (UUID(0x2908), DSC_F_READ),                                                                         # 0x2908 = HID reference, to be read by client.
+                )),
+                (UUID(0x2A4D), F_READ_WRITE_NOTIFY_NORESPONSE, (                                                        # 0x2A4D = HID report
+                    (UUID(0x2908), DSC_F_READ),                                                                         # 0x2908 = HID reference, to be read by client.
+                )),
+                (UUID(0x2A4E), F_READ_WRITE_NORESPONSE),                                                                # 0x2A4E = HID protocol mode, to be written & read by client.
             ),
         )
 
         # fmt: off
-        self.HID_INPUT_REPORT = bytes([                                                                                 # Report Description: describes what we communicate.
+        self.HID_INPUT_REPORT = [                                                                                       # Report Description: describes what we communicate.
             0x05, 0x01,                                                                                                 # USAGE_PAGE (Generic Desktop)
             0x09, 0x06,                                                                                                 # USAGE (Keyboard)
             0xa1, 0x01,                                                                                                 # COLLECTION (Application)
@@ -874,7 +914,7 @@ class Keyboard(HumanInterfaceDevice):
             0x29, 0x65,                                                                                                 #     Usage Maximum (101)
             0x81, 0x00,                                                                                                 #     Input (Data, Array); Key array (6 bytes)
             0xc0                                                                                                        # END_COLLECTION
-        ])
+        ]
         # fmt: on
 
         # Define the initial keyboard state.
@@ -883,20 +923,22 @@ class Keyboard(HumanInterfaceDevice):
 
         self.kb_callback = None                                                                                         # Callback function for keyboard messages from client.
 
-        self.services = [self.DIS, self.BAS, self.HIDS]                                                                 # Override list of service descriptions.
+        self.services.append(self.HIDS)                                                                                 # Append to list of service descriptions.
 
     # Interrupt request callback function
     # Overwrite super to catch keyboard report write events by the central.
     def ble_irq(self, event, data):
         if event == _IRQ_GATTS_WRITE:                                                                                   # If a client has written to a characteristic or descriptor.
-            print("Keyboard changed by Central")
             conn_handle, attr_handle = data                                                                             # Get the handle to the characteristic that was written.
-            report = self._ble.gatts_read(attr_handle)                                                                  # Read the report.
-            bytes = struct.unpack("B", report)                                                                          # Unpack the report.
-            if self.kb_callback is not None:                                                                            # Call the callback function.
-                self.kb_callback(bytes)
-        else:                                                                                                           # Else let super handle the event.
-            super(Keyboard, self).ble_irq(event, data)
+            if attr_handle == self.h_repout:
+                print("Keyboard changed by Central")
+                report = self._ble.gatts_read(attr_handle)                                                              # Read the report.
+                bytes = struct.unpack("B", report)                                                                      # Unpack the report.
+                if self.kb_callback is not None:                                                                        # Call the callback function.
+                    self.kb_callback(bytes)
+                return _GATTS_NO_ERROR
+
+        return super(Keyboard, self).ble_irq(event, data)                                                               # Let super handle the event.
 
     # Overwrite super to register HID specific service.
     def start(self):
@@ -904,29 +946,35 @@ class Keyboard(HumanInterfaceDevice):
 
         print("Registering services")
         handles = self._ble.gatts_register_services(self.services)                                                      # Register services and get read/write handles for all services.
-        self.write_service_characteristics(handles)                                                                     # Write the values for the characteristics.
+        self.save_service_characteristics(handles)                                                                      # Save the values for the characteristics.
+        self.write_service_characteristics()                                                                            # Write the values for the characteristics.
         self.adv = Advertiser(self._ble, [UUID(0x1812)], self.device_appearance, self.device_name)                      # Create an Advertiser. Only advertise the top level service, i.e., the HIDS.
         print("Server started")
 
-    # Overwrite super to write HID specific characteristics.
-    def write_service_characteristics(self, handles):
-        super(Keyboard, self).write_service_characteristics(handles)                                                    # Call super to write DIS and BAS characteristics.
+    # Overwrite super to save HID specific characteristics.
+    def save_service_characteristics(self, handles):
+        super(Keyboard, self).save_service_characteristics(handles)                                                     # Call super to write DIS and BAS characteristics.
 
-        (h_info, h_hid, _, self.h_rep, h_d1, self.h_repout, h_d2, h_proto) = handles[2]                                 # Get the handles for the HIDS characteristics. These correspond directly to self.HIDS. Position 2 because of the order of self.services.
+        (h_info, h_hid, h_ctrl, self.h_rep, h_d1, self.h_repout, h_d2, h_proto) = handles[3]                            # Get the handles for the HIDS characteristics. These correspond directly to self.HIDS. Position 3 because of the order of self.services.
 
-        print("Writing hid service characteristics")
-        # Write service characteristics
-        self._ble.gatts_write(h_info, b"\x01\x01\x00\x02")                                                              # HID info: ver=1.1, country=0, flags=normal.
-        self._ble.gatts_write(h_hid, self.HID_INPUT_REPORT)                                                             # HID input report map.
-        self._ble.gatts_write(h_d1, struct.pack("<BB", 1, 1))                                                           # HID reference: id=1, type=input.
-        self._ble.gatts_write(h_d2, struct.pack("<BB", 1, 2))                                                           # HID reference: id=1, type=output.
-        self._ble.gatts_write(h_proto, b"\x01")                                                                         # HID protocol mode: report.
+        state = struct.pack("8B", self.modifiers, 0, self.keypresses[0], self.keypresses[1], self.keypresses[2], self.keypresses[3], self.keypresses[4], self.keypresses[5])
+
+        print("Saving HID service characteristics")
+        self.characteristics[h_info] = ("HID information", b"\x01\x01\x00\x00")                                         # HID info: ver=1.1, country=0, flags=000000cw with c=normally connectable w=wake up signal
+        self.characteristics[h_hid] = ("HID input report map", bytes(self.HID_INPUT_REPORT))                            # HID input report map.
+        self.characteristics[h_ctrl] = ("HID control point", b"\x00")                                                   # HID control point.
+        self.characteristics[self.h_rep] = ("HID input report", state)                                                  # HID report.
+        self.characteristics[h_d1] = ("HID input reference", struct.pack("<BB", 1, 1))                                  # HID reference: id=1, type=input.
+        self.characteristics[self.h_repout] = ("HID output report", state)                                              # HID report.
+        self.characteristics[h_d2] = ("HID output reference", struct.pack("<BB", 1, 2))                                 # HID reference: id=1, type=output.
+        self.characteristics[h_proto] = ("HID protocol mode", b"\x01")                                                  # HID protocol mode: report.
 
     # Overwrite super to notify central of a hid report.
     def notify_hid_report(self):
         if self.is_connected():
             # Pack the Keyboard state as described by the input report.
             state = struct.pack("8B", self.modifiers, 0, self.keypresses[0], self.keypresses[1], self.keypresses[2], self.keypresses[3], self.keypresses[4], self.keypresses[5])
+            self.characteristics[self.h_rep] = ("HID input report", state)
             self._ble.gatts_notify(self.conn_handle, self.h_rep, state)                                                 # Notify central by writing to the report handle.
             print("Notify with report: ", struct.unpack("8B", state))
 
